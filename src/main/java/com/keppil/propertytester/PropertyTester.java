@@ -15,8 +15,10 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.commons.collections4.ListUtils;
 import org.apache.commons.lang3.ArrayUtils;
@@ -48,12 +50,11 @@ public class PropertyTester<T> {
 	private static final List<String> getterPrefixes = ListUtils.unmodifiableList(Arrays.asList("get", "is"));
 	private static final String setterPrefix = "set";
 
-	private final Set<PropertyInfo> methodHolders = new HashSet<>();
-
 	private final Class<T> clazz;
 	private static Map<Class<?>, Supplier<Object>> standardRandomMethods;
 
 	private final Map<Class<?>, Supplier<Object>> customRandomMethods = new HashMap<>();
+	private final Set<String> excludedProperties = new HashSet<>();
 
 	{
 		final Map<Class<?>, Supplier<Object>> standardMethods = new HashMap<>();
@@ -79,6 +80,9 @@ public class PropertyTester<T> {
 		standardMethods.put(Set.class, Collections::emptySet);
 		standardMethods.put(Map.class, Collections::emptyMap);
 		standardRandomMethods = Collections.unmodifiableMap(standardMethods);
+
+		// Needed when using EclEmma plugin
+		excludedProperties.add("$jacocoData");
 	}
 
 	/**
@@ -89,11 +93,6 @@ public class PropertyTester<T> {
 	 */
 	public PropertyTester(final Class<T> clazz) {
 		this.clazz = clazz;
-		final Field[] allFields = clazz.getDeclaredFields();
-		final Method[] allMethods = clazz.getDeclaredMethods();
-		for (final Field field : allFields) {
-			this.methodHolders.add(findMethodsForField(field, allMethods));
-		}
 	}
 
 	/**
@@ -119,7 +118,26 @@ public class PropertyTester<T> {
 		this.customRandomMethods.put(clazz, randomMethod);
 	}
 
-	public void excludeProperties(final String... propertyNames)
+	/**
+	 * This method can be used to exclude one or more properties from testing. This might be useful if they don't conform to the standard contract for
+	 * a property.
+	 * <p>
+	 * Sample usage:
+	 *
+	 * <pre>
+	 *
+	 * public ExamplePojoTest() {
+	 * 	super(ExamplePojo.class);
+	 * 	excludeProperties(&quot;myNonStandardProperty&quot;);
+	 * }
+	 * </pre>
+	 *
+	 * @param propertyNames
+	 *            The names of the property/properties to exclude.
+	 */
+	public void excludeProperties(final String... propertyNames) {
+		this.excludedProperties.addAll(Arrays.asList(propertyNames));
+	}
 
 	/**
 	 * A test that makes sure that all properties with a non-primitive type can be set to {@code null} and be retrieved.
@@ -127,7 +145,8 @@ public class PropertyTester<T> {
 	 */
 	@Test
 	public void nullValuesAreHandledCorrectly() throws Exception {
-		testValues(this.methodHolders.parallelStream().filter(m -> !m.getType().isPrimitive()).collect(Collectors.toSet()), any -> null, 1);
+		Set<PropertyInfo> propertiesToTest = findPropertiesToTest(field -> !field.getType().isPrimitive());
+		testValues(propertiesToTest, any -> null, 1);
 	}
 
 	/**
@@ -137,7 +156,19 @@ public class PropertyTester<T> {
 	 */
 	@Test
 	public void randomValuesAreHandledCorrectly() throws Exception {
-		testValues(this.methodHolders, this::randomInstanceOf, REPETITIONS_FOR_RANDOM_TEST);
+		Set<PropertyInfo> propertiesToTest = findPropertiesToTest(any -> true);
+		testValues(propertiesToTest, this::randomInstanceOf, REPETITIONS_FOR_RANDOM_TEST);
+	}
+
+	private Set<PropertyInfo> findPropertiesToTest(Predicate<Field> fieldFilter) {
+		final Set<PropertyInfo> properties = new HashSet<>();
+		final List<Field> filteredFields = Stream.of(this.clazz.getDeclaredFields()).filter(fieldFilter)
+				.filter(field -> !this.excludedProperties.contains(field.getName())).collect(Collectors.toList());
+		final Method[] allMethods = this.clazz.getDeclaredMethods();
+		for (final Field field : filteredFields) {
+			properties.add(findMethodsForField(field, allMethods));
+		}
+		return properties;
 	}
 
 	private void testValues(final Collection<PropertyInfo> methodHoldersToTest, final Function<Class<?>, Object> argumentFunction,
@@ -166,11 +197,10 @@ public class PropertyTester<T> {
 			randomInstance = this.customRandomMethods.get(clazz).get();
 		} else {
 			try {
-				clazz.getConstructor().newInstance();
+				randomInstance = clazz.getConstructor().newInstance();
 			} catch (final Exception e) {
-				fail(String
-						.format("Unable to create a random instance of '%s'. Either add a no argument constructor to the %1$s class or provide a way to generate an instance via PropertyTester#addRandomMethod().",
-								clazz.getSimpleName()));
+				fail(String.format("Unable to create a random instance of '%s'. Either add a no argument constructor to the %1$s class or provide a way to generate an instance via PropertyTester#addRandomMethod().",
+							clazz.getSimpleName()));
 			}
 		}
 		return randomInstance;
